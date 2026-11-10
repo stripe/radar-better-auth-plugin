@@ -17,7 +17,8 @@ export default defineConfig({
   webServer: {
     command:
       "npm run db:migrate && npm run dev -w nextjs-example -- --port 3100",
-    url: "http://localhost:3100",
+    // The form waits for this route, which Next.js compiles on first access.
+    url: "http://localhost:3100/api/auth/get-session",
     timeout: 120_000,
     env: {
       ACCOUNT_EVALUATIONS_MODE: "mock",
