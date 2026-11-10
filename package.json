@@ -1,0 +1,45 @@
+{
+  "name": "account-evaluations-better-auth-workspace",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "npm run build -w @stripe/radar-better-auth && npm run build -w nextjs-example",
+    "pack": "npm run build -w @stripe/radar-better-auth && npm pack ./packages/account-evaluations --pack-destination build",
+    "dev": "npm run build -w @stripe/radar-better-auth && npm run dev -w nextjs-example",
+    "db:migrate": "npm run db:migrate -w nextjs-example",
+    "test": "vitest run",
+    "test:package": "npm run build -w @stripe/radar-better-auth && node --test tests/integration/package.test.mjs",
+    "typecheck": "npm run typecheck --workspaces && tsc --project tests/integration/tsconfig.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:e2e": "npm run build -w @stripe/radar-better-auth && playwright test",
+    "test:stripe": "node --import tsx --env-file-if-exists=examples/nextjs/.env.local tests/integration/stripe.ts"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.0.0",
+    "better-auth": "1.7.7",
+    "prettier": "^3.6.2",
+    "stripe": "23.1.0-alpha.4",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "4.1.12"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1",
+    "postcss": "8.5.28",
+    "next": {
+      "postcss": "8.5.28"
+    }
+  }
+}

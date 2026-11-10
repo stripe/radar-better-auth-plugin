@@ -1,0 +1,47 @@
+{
+  "name": "@stripe/radar-better-auth",
+  "version": "0.1.0",
+  "description": "Stripe v2 Account Evaluations for Better Auth email/password flows",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    }
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/client.ts --format esm --dts --clean",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "better-auth": ">=1.7.7 <1.8.0"
+  },
+  "dependencies": {
+    "@better-fetch/fetch": "^1.3.1",
+    "@stripe/stripe-js": "9.15.0",
+    "better-call": "^1.4.0",
+    "stripe": "23.1.0-alpha.4"
+  },
+  "devDependencies": {
+    "better-auth": "1.7.7"
+  }
+}
