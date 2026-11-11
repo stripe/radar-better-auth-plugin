@@ -6,10 +6,8 @@ Stripe [Account Evaluations](https://docs.stripe.com/radar/customer-account-eval
 
 Requires Node.js 22.13+ and Better Auth 1.7.x (1.7.7 or later). Use a secret key and publishable key from the same Stripe account that has access to the Account Evaluations API.
 
-This package is unpublished. From the repository root, run `npm install` and `npm run pack`, then install the generated tarball from `build/` in your app:
-
 ```sh
-npm install /path/to/package.tgz
+npm install @stripe/radar-better-auth
 ```
 
 ## Configure

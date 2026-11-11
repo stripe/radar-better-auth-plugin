@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "Stripe v2 Account Evaluations for Better Auth email/password flows",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stripe/radar-better-auth-plugin.git",
+    "directory": "packages/account-evaluations"
+  },
   "publishConfig": {
     "access": "public"
   },
