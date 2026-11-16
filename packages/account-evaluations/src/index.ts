@@ -170,20 +170,25 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
   ): Promise<ClientDetails> {
     if (!isSocialCallback(ctx.path)) return deviceDetailsFromRequest(ctx);
 
-    // Better Auth has already validated the OAuth state. Recover the device
-    // evidence our before hook saved in serverContext, not caller-supplied
-    // additionalData.
+    // Our goal is to recover the device details from the initial before hook.
     const saved = (await getOAuthState())?.serverContext
       ?.accountEvaluationsDevice;
+    
+    // No device details, fall back to current-request details
     if (!isRecord(saved)) return deviceDetailsFromRequest(ctx);
 
+    // Explicit failure
     if (
       saved.error === "INVALID_RADAR_SESSION" ||
       saved.error === "RADAR_SESSION_REQUIRED"
     )
       throw deviceError(saved.error);
+
+    // Radar session found
     if (typeof saved.radar_session === "string")
       return { radar_session: saved.radar_session };
+
+    // Radar session not found, but fallback was found
     if (isRecord(saved.data) && typeof saved.data.ip === "string") {
       return {
         data: {
@@ -197,6 +202,8 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
         },
       };
     }
+
+    // Nothing was found, default to current-request details
     return deviceDetailsFromRequest(ctx);
   }
 
