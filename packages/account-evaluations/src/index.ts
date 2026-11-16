@@ -1,6 +1,17 @@
 import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
-import { APIError, createAuthMiddleware, getIP } from "better-auth/api";
-import { RADAR_SESSION_HEADER, protectedPaths } from "./shared.js";
+import {
+  APIError,
+  addOAuthServerContext,
+  createAuthMiddleware,
+  getIP,
+  getOAuthState,
+  isAPIError,
+} from "better-auth/api";
+import {
+  RADAR_SESSION_HEADER,
+  isProtectedPath,
+  isSocialCallback,
+} from "./shared.js";
 import {
   createStripeAccountEvaluationsClient,
   validateEvaluation,
@@ -59,8 +70,23 @@ export type AccountEvaluationsConfig = AccountEvaluationsOptions & {
 type PendingEvaluation = { evaluation: Evaluation; report: DecisionReport };
 class RequestState {
   pending?: PendingEvaluation;
+  registration = false;
 }
 type StateContext = { accountEvaluationsState?: RequestState };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function deviceError(code: "INVALID_RADAR_SESSION" | "RADAR_SESSION_REQUIRED") {
+  return new APIError("BAD_REQUEST", {
+    code,
+    message:
+      code === "INVALID_RADAR_SESSION"
+        ? "Invalid device verification. Please try again."
+        : "Device verification is required. Please try again.",
+  });
+}
 
 export function accountEvaluations(options: AccountEvaluationsConfig) {
   const client =
@@ -114,10 +140,7 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     const token = headers?.get(RADAR_SESSION_HEADER);
     if (token !== null && token !== undefined) {
       if (!/^rse_[a-zA-Z0-9_]{1,250}$/.test(token)) {
-        throw new APIError("BAD_REQUEST", {
-          code: "INVALID_RADAR_SESSION",
-          message: "Invalid device verification. Please try again.",
-        });
+        throw deviceError("INVALID_RADAR_SESSION");
       }
       return { radar_session: token };
     }
@@ -137,10 +160,41 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     }
 
     // If we have nothing, we won't have enough info to evaluate, so we fail
-    throw new APIError("BAD_REQUEST", {
-      code: "RADAR_SESSION_REQUIRED",
-      message: "Device verification is required. Please try again.",
-    });
+    throw deviceError("RADAR_SESSION_REQUIRED");
+  }
+
+  async function evaluationDeviceDetails(
+    ctx: GenericEndpointContext,
+  ): Promise<ClientDetails> {
+    if (isSocialCallback(ctx.path)) {
+      // Better Auth authenticates and consumes OAuth state before database hooks.
+      // Only serverContext is trusted; additionalData is supplied by the client.
+      const saved = (await getOAuthState())?.serverContext
+        ?.accountEvaluationsDevice;
+      if (isRecord(saved)) {
+        if (
+          saved.error === "INVALID_RADAR_SESSION" ||
+          saved.error === "RADAR_SESSION_REQUIRED"
+        )
+          throw deviceError(saved.error);
+        if (typeof saved.radar_session === "string")
+          return { radar_session: saved.radar_session };
+        if (isRecord(saved.data) && typeof saved.data.ip === "string") {
+          return {
+            data: {
+              ip: saved.data.ip,
+              ...(typeof saved.data.user_agent === "string"
+                ? { user_agent: saved.data.user_agent }
+                : {}),
+              ...(typeof saved.data.referrer === "string"
+                ? { referrer: saved.data.referrer }
+                : {}),
+            },
+          };
+        }
+      }
+    }
+    return deviceDetails(ctx);
   }
 
   async function evaluate(
@@ -155,7 +209,7 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     // Attempt to get client details.
     let clientDetails: ClientDetails;
     try {
-      clientDetails = deviceDetails(ctx);
+      clientDetails = await evaluationDeviceDetails(ctx);
     } catch (error) {
       await notifyError({ operation: "evaluation", error }, ctx);
       if (failureMode === "open") return;
@@ -228,7 +282,10 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
             user: {
               create: {
                 async before(user, ctx) {
-                  if (ctx?.path !== "/sign-up/email") return;
+                  if (!ctx || !isProtectedPath(ctx.path)) return;
+                  const state = (ctx.context as StateContext)
+                    .accountEvaluationsState;
+                  if (state) state.registration = true;
                   await evaluate(user, "registration", ctx);
                 },
               },
@@ -236,7 +293,14 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
             session: {
               create: {
                 async before(session, ctx) {
-                  if (ctx?.path !== "/sign-in/email") return;
+                  if (
+                    !ctx ||
+                    !isProtectedPath(ctx.path) ||
+                    ctx.path === "/sign-up/email" ||
+                    (ctx.context as StateContext).accountEvaluationsState
+                      ?.registration
+                  )
+                    return;
                   const user = await ctx.context.internalAdapter.findUserById(
                     session.userId,
                   );
@@ -255,16 +319,28 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     hooks: {
       before: [
         {
-          matcher: (ctx) => protectedPaths.some((path) => path === ctx.path),
+          matcher: (ctx) => isProtectedPath(ctx.path),
           handler: createAuthMiddleware(async (ctx) => {
             (ctx.context as StateContext).accountEvaluationsState =
               new RequestState();
+            if (ctx.path === "/sign-in/social" && !ctx.body?.idToken) {
+              // Preserve device evidence across the redirect without a separate
+              // cookie, and defer collection failures until identity is verified.
+              let device;
+              try {
+                device = deviceDetails(ctx);
+              } catch (error) {
+                if (!isAPIError(error)) throw error;
+                device = { error: error.body?.code };
+              }
+              await addOAuthServerContext({ accountEvaluationsDevice: device });
+            }
           }),
         },
       ],
       after: [
         {
-          matcher: (ctx) => protectedPaths.some((path) => path === ctx.path),
+          matcher: (ctx) => isProtectedPath(ctx.path),
           handler: createAuthMiddleware(async (ctx) => {
             const state = (ctx.context as StateContext).accountEvaluationsState;
             const pending = state?.pending;
@@ -272,12 +348,12 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
             state.pending = undefined;
             const result = ctx.context.returned;
             // Report allowed only after auth succeeds.
-            if (
-              result &&
-              typeof result === "object" &&
-              "user" in result &&
-              !(result instanceof APIError)
-            ) {
+            const authenticated = isSocialCallback(ctx.path)
+              ? ctx.context.newSession &&
+                isAPIError(result) &&
+                result.statusCode === 302
+              : isRecord(result) && "user" in result && !isAPIError(result);
+            if (authenticated) {
               await report(pending, ctx);
             }
           }),

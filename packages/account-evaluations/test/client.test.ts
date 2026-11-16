@@ -45,6 +45,22 @@ afterEach(() => {
 });
 
 describe("publishable-key client configuration", () => {
+  it("collects fresh Radar Sessions for social redirects and ID-token sign-in", async () => {
+    const { client, fetcher } = setup();
+    await client.signIn.social({ provider: "google", callbackURL: "/welcome" });
+    await client.signIn.social({
+      provider: "google",
+      idToken: { token: "test-token" },
+    });
+    expect(createRadarSession).toHaveBeenCalledTimes(2);
+    for (const [url, init] of fetcher.mock.calls) {
+      expect(String(url)).toMatch(/\/sign-in\/social$/);
+      expect(new Headers(init?.headers).get("x-stripe-radar-session")).toBe(
+        "rse_default",
+      );
+    }
+  });
+
   it("does not preload during SSR and collects fresh sessions for both auth methods", async () => {
     const { client, fetcher } = setup();
     expect(loadStripe).not.toHaveBeenCalled();

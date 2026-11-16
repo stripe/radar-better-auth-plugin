@@ -1,7 +1,7 @@
 {
   "name": "@stripe/radar-better-auth",
   "version": "0.1.0",
-  "description": "Stripe v2 Account Evaluations for Better Auth email/password flows",
+  "description": "Stripe v2 Account Evaluations for Better Auth email/password and social authentication",
   "license": "MIT",
   "repository": {
     "type": "git",
