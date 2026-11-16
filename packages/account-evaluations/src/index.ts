@@ -306,18 +306,20 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
                   if (
                     !ctx ||
                     !isProtectedPath(ctx.path) ||
-                    ctx.path === "/sign-up/email" ||
                     (ctx.context as StateContext).accountEvaluationsState
                       ?.registration
                   )
                     return;
+
                   const user = await ctx.context.internalAdapter.findUserById(
                     session.userId,
                   );
+
                   if (!user)
                     throw new APIError("UNAUTHORIZED", {
                       message: "Invalid credentials.",
                     });
+
                   await evaluate(user, "login", ctx);
                 },
               },
@@ -331,20 +333,22 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
         {
           matcher: (ctx) => isProtectedPath(ctx.path),
           handler: createAuthMiddleware(async (ctx) => {
+            // Initialize the request state for all protected paths
             (ctx.context as StateContext).accountEvaluationsState =
               new RequestState();
-            if (ctx.path === "/sign-in/social" && !ctx.body?.idToken) {
-              // Preserve device evidence across the redirect without a separate
-              // cookie, and defer collection failures until identity is verified.
-              let device;
-              try {
-                device = deviceDetailsFromRequest(ctx);
-              } catch (error) {
-                if (!isAPIError(error)) throw error;
-                device = { error: error.body?.code };
-              }
-              await addOAuthServerContext({ accountEvaluationsDevice: device });
+            
+            // If not a social callback, return early
+            if (ctx.path !== "/sign-in/social" || ctx.body?.idToken) return;
+
+            // For redirect-based social signins, we need to save device details into context
+            let device;
+            try {
+              device = deviceDetailsFromRequest(ctx);
+            } catch (error) {
+              if (!isAPIError(error)) throw error;
+              device = { error: error.body?.code };
             }
+            await addOAuthServerContext({ accountEvaluationsDevice: device });
           }),
         },
       ],
