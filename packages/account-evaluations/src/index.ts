@@ -134,7 +134,9 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     }
   }
 
-  function deviceDetails(ctx: GenericEndpointContext): ClientDetails {
+  function deviceDetailsFromRequest(
+    ctx: GenericEndpointContext,
+  ): ClientDetails {
     // Try using the Radar Session first (this provides the most accurate signal)
     const headers = ctx.headers ?? ctx.request?.headers;
     const token = headers?.get(RADAR_SESSION_HEADER);
@@ -166,35 +168,35 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
   async function evaluationDeviceDetails(
     ctx: GenericEndpointContext,
   ): Promise<ClientDetails> {
-    if (isSocialCallback(ctx.path)) {
-      // Better Auth authenticates and consumes OAuth state before database hooks.
-      // Only serverContext is trusted; additionalData is supplied by the client.
-      const saved = (await getOAuthState())?.serverContext
-        ?.accountEvaluationsDevice;
-      if (isRecord(saved)) {
-        if (
-          saved.error === "INVALID_RADAR_SESSION" ||
-          saved.error === "RADAR_SESSION_REQUIRED"
-        )
-          throw deviceError(saved.error);
-        if (typeof saved.radar_session === "string")
-          return { radar_session: saved.radar_session };
-        if (isRecord(saved.data) && typeof saved.data.ip === "string") {
-          return {
-            data: {
-              ip: saved.data.ip,
-              ...(typeof saved.data.user_agent === "string"
-                ? { user_agent: saved.data.user_agent }
-                : {}),
-              ...(typeof saved.data.referrer === "string"
-                ? { referrer: saved.data.referrer }
-                : {}),
-            },
-          };
-        }
+    if (!isSocialCallback(ctx.path)) return deviceDetailsFromRequest(ctx);
+
+    // Better Auth authenticates and consumes OAuth state before database hooks.
+    // Only serverContext is trusted; additionalData is supplied by the client.
+    const saved = (await getOAuthState())?.serverContext
+      ?.accountEvaluationsDevice;
+    if (isRecord(saved)) {
+      if (
+        saved.error === "INVALID_RADAR_SESSION" ||
+        saved.error === "RADAR_SESSION_REQUIRED"
+      )
+        throw deviceError(saved.error);
+      if (typeof saved.radar_session === "string")
+        return { radar_session: saved.radar_session };
+      if (isRecord(saved.data) && typeof saved.data.ip === "string") {
+        return {
+          data: {
+            ip: saved.data.ip,
+            ...(typeof saved.data.user_agent === "string"
+              ? { user_agent: saved.data.user_agent }
+              : {}),
+            ...(typeof saved.data.referrer === "string"
+              ? { referrer: saved.data.referrer }
+              : {}),
+          },
+        };
       }
     }
-    return deviceDetails(ctx);
+    return deviceDetailsFromRequest(ctx);
   }
 
   async function evaluate(
@@ -328,7 +330,7 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
               // cookie, and defer collection failures until identity is verified.
               let device;
               try {
-                device = deviceDetails(ctx);
+                device = deviceDetailsFromRequest(ctx);
               } catch (error) {
                 if (!isAPIError(error)) throw error;
                 device = { error: error.body?.code };
