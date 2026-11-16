@@ -170,31 +170,32 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
   ): Promise<ClientDetails> {
     if (!isSocialCallback(ctx.path)) return deviceDetailsFromRequest(ctx);
 
-    // Better Auth authenticates and consumes OAuth state before database hooks.
-    // Only serverContext is trusted; additionalData is supplied by the client.
+    // Better Auth has already validated the OAuth state. Recover the device
+    // evidence our before hook saved in serverContext, not caller-supplied
+    // additionalData.
     const saved = (await getOAuthState())?.serverContext
       ?.accountEvaluationsDevice;
-    if (isRecord(saved)) {
-      if (
-        saved.error === "INVALID_RADAR_SESSION" ||
-        saved.error === "RADAR_SESSION_REQUIRED"
-      )
-        throw deviceError(saved.error);
-      if (typeof saved.radar_session === "string")
-        return { radar_session: saved.radar_session };
-      if (isRecord(saved.data) && typeof saved.data.ip === "string") {
-        return {
-          data: {
-            ip: saved.data.ip,
-            ...(typeof saved.data.user_agent === "string"
-              ? { user_agent: saved.data.user_agent }
-              : {}),
-            ...(typeof saved.data.referrer === "string"
-              ? { referrer: saved.data.referrer }
-              : {}),
-          },
-        };
-      }
+    if (!isRecord(saved)) return deviceDetailsFromRequest(ctx);
+
+    if (
+      saved.error === "INVALID_RADAR_SESSION" ||
+      saved.error === "RADAR_SESSION_REQUIRED"
+    )
+      throw deviceError(saved.error);
+    if (typeof saved.radar_session === "string")
+      return { radar_session: saved.radar_session };
+    if (isRecord(saved.data) && typeof saved.data.ip === "string") {
+      return {
+        data: {
+          ip: saved.data.ip,
+          ...(typeof saved.data.user_agent === "string"
+            ? { user_agent: saved.data.user_agent }
+            : {}),
+          ...(typeof saved.data.referrer === "string"
+            ? { referrer: saved.data.referrer }
+            : {}),
+        },
+      };
     }
     return deviceDetailsFromRequest(ctx);
   }
