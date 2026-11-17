@@ -74,6 +74,13 @@ class RequestState {
 }
 type StateContext = { accountEvaluationsState?: RequestState };
 
+function requestState(ctx: GenericEndpointContext): RequestState {
+  const state = (ctx.context as StateContext).accountEvaluationsState;
+  if (!state)
+    throw new Error("Account evaluations request context is missing.");
+  return state;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -97,16 +104,40 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     throw new Error("blockThreshold must be a number between 0 and 100.");
   }
 
+  function warn(ctx: GenericEndpointContext, message: string) {
+    try {
+      ctx.context.logger.warn(message);
+    } catch {
+      // Logging failures must not change the authentication result.
+    }
+  }
+
   async function notifyError(
     event: PluginErrorEvent,
     ctx: GenericEndpointContext,
   ) {
-    ctx.context.logger.warn(`[account-evaluations] ${event.operation} failed`);
+    warn(ctx, `[account-evaluations] ${event.operation} failed`);
     try {
       await options.onError?.(event);
     } catch {
-      ctx.context.logger.warn("[account-evaluations] onError callback failed");
+      warn(ctx, "[account-evaluations] onError callback failed");
     }
+  }
+
+  async function handleEvaluationError(
+    error: unknown,
+    ctx: GenericEndpointContext,
+    responseError?: APIError,
+  ) {
+    await notifyError({ operation: "evaluation", error }, ctx);
+    if (failureMode === "open") return;
+    throw (
+      responseError ??
+      new APIError("SERVICE_UNAVAILABLE", {
+        code: "ACCOUNT_EVALUATION_UNAVAILABLE",
+        message: "Unable to verify this attempt. Please try again shortly.",
+      })
+    );
   }
 
   async function report(
@@ -173,7 +204,7 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     // Our goal is to recover the device details from the initial before hook.
     const saved = (await getOAuthState())?.serverContext
       ?.accountEvaluationsDevice;
-    
+
     // No device details, fall back to current-request details
     if (!isRecord(saved)) return deviceDetailsFromRequest(ctx);
 
@@ -221,9 +252,11 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     try {
       clientDetails = await evaluationDeviceDetails(ctx);
     } catch (error) {
-      await notifyError({ operation: "evaluation", error }, ctx);
-      if (failureMode === "open") return;
-      throw error;
+      return handleEvaluationError(
+        error,
+        ctx,
+        isAPIError(error) ? error : undefined,
+      );
     }
 
     // Attempt to get an evaluation.
@@ -245,12 +278,7 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
           : "user_account_sharing",
       );
     } catch (error) {
-      await notifyError({ operation: "evaluation", error }, ctx);
-      if (failureMode === "open") return;
-      throw new APIError("SERVICE_UNAVAILABLE", {
-        code: "ACCOUNT_EVALUATION_UNAVAILABLE",
-        message: "Unable to verify this attempt. Please try again shortly.",
-      });
+      return handleEvaluationError(error, ctx);
     }
 
     // If the eval shows high-risk (and we're not in monitor mode), block
@@ -276,10 +304,11 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
     }
 
     // Save result in state. Note that this is required for reporting.
-    const state = (ctx.context as StateContext).accountEvaluationsState;
-    if (!state)
-      throw new Error("Account evaluations request context is missing.");
-    state.pending = pending;
+    try {
+      requestState(ctx).pending = pending;
+    } catch (error) {
+      await handleEvaluationError(error, ctx);
+    }
   }
 
   return {
@@ -293,9 +322,11 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
               create: {
                 async before(user, ctx) {
                   if (!ctx || !isProtectedPath(ctx.path)) return;
-                  const state = (ctx.context as StateContext)
-                    .accountEvaluationsState;
-                  if (state) state.registration = true;
+                  try {
+                    requestState(ctx).registration = true;
+                  } catch (error) {
+                    return handleEvaluationError(error, ctx);
+                  }
                   await evaluate(user, "registration", ctx);
                 },
               },
@@ -303,23 +334,20 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
             session: {
               create: {
                 async before(session, ctx) {
-                  if (
-                    !ctx ||
-                    !isProtectedPath(ctx.path) ||
-                    (ctx.context as StateContext).accountEvaluationsState
-                      ?.registration
-                  )
-                    return;
-
-                  const user = await ctx.context.internalAdapter.findUserById(
-                    session.userId,
-                  );
-
-                  if (!user)
-                    throw new APIError("UNAUTHORIZED", {
-                      message: "Invalid credentials.",
-                    });
-
+                  if (!ctx || !isProtectedPath(ctx.path)) return;
+                  let user;
+                  try {
+                    if (requestState(ctx).registration) return;
+                    user = await ctx.context.internalAdapter.findUserById(
+                      session.userId,
+                    );
+                    if (!user)
+                      throw new Error(
+                        "Account evaluation user could not be resolved.",
+                      );
+                  } catch (error) {
+                    return handleEvaluationError(error, ctx);
+                  }
                   await evaluate(user, "login", ctx);
                 },
               },
@@ -333,22 +361,25 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
         {
           matcher: (ctx) => isProtectedPath(ctx.path),
           handler: createAuthMiddleware(async (ctx) => {
-            // Initialize the request state for all protected paths
-            (ctx.context as StateContext).accountEvaluationsState =
-              new RequestState();
-            
-            // If not a social callback, return early
-            if (ctx.path !== "/sign-in/social" || ctx.body?.idToken) return;
-
-            // For redirect-based social signins, we need to save device details into context
-            let device;
             try {
-              device = deviceDetailsFromRequest(ctx);
+              // Initialize the request state for all protected paths
+              (ctx.context as StateContext).accountEvaluationsState =
+                new RequestState();
+
+              // Only redirect-based social sign-in needs to preserve evidence.
+              if (ctx.path !== "/sign-in/social" || ctx.body?.idToken) return;
+
+              let device;
+              try {
+                device = deviceDetailsFromRequest(ctx);
+              } catch (error) {
+                if (!isAPIError(error)) throw error;
+                device = { error: error.body?.code };
+              }
+              await addOAuthServerContext({ accountEvaluationsDevice: device });
             } catch (error) {
-              if (!isAPIError(error)) throw error;
-              device = { error: error.body?.code };
+              await handleEvaluationError(error, ctx);
             }
-            await addOAuthServerContext({ accountEvaluationsDevice: device });
           }),
         },
       ],
@@ -356,19 +387,25 @@ export function accountEvaluations(options: AccountEvaluationsConfig) {
         {
           matcher: (ctx) => isProtectedPath(ctx.path),
           handler: createAuthMiddleware(async (ctx) => {
-            const state = (ctx.context as StateContext).accountEvaluationsState;
-            const pending = state?.pending;
-            if (!pending) return;
-            state.pending = undefined;
-            const result = ctx.context.returned;
-            // Report allowed only after auth succeeds.
-            const authenticated = isSocialCallback(ctx.path)
-              ? ctx.context.newSession &&
-                isAPIError(result) &&
-                result.statusCode === 302
-              : isRecord(result) && "user" in result && !isAPIError(result);
-            if (authenticated) {
-              await report(pending, ctx);
+            try {
+              const state = (ctx.context as StateContext)
+                .accountEvaluationsState;
+              const pending = state?.pending;
+              if (!pending) return;
+              state.pending = undefined;
+              const result = ctx.context.returned;
+              // Report allowed only after auth succeeds.
+              const authenticated = isSocialCallback(ctx.path)
+                ? ctx.context.newSession &&
+                  isAPIError(result) &&
+                  result.statusCode === 302
+                : isRecord(result) && "user" in result && !isAPIError(result);
+              if (authenticated) {
+                await report(pending, ctx);
+              }
+            } catch (error) {
+              // Reporting runs after authentication; never turn it into a failure.
+              await notifyError({ operation: "report", error }, ctx);
             }
           }),
         },

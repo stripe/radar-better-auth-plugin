@@ -1,12 +1,33 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
-import { APIError } from "better-auth/api";
+import {
+  APIError,
+  addOAuthServerContext,
+  getIP,
+  getOAuthState,
+} from "better-auth/api";
 import {
   accountEvaluations,
   type AccountEvaluationsClient,
   type AccountEvaluationsConfig,
 } from "../src/index.js";
+
+vi.mock("better-auth/api", async (importOriginal) => {
+  const api = await importOriginal<typeof import("better-auth/api")>();
+  return {
+    ...api,
+    addOAuthServerContext: vi.fn(api.addOAuthServerContext),
+    getOAuthState: vi.fn(api.getOAuthState),
+    getIP: vi.fn(api.getIP),
+  };
+});
+
+afterEach(() => {
+  vi.mocked(addOAuthServerContext).mockReset();
+  vi.mocked(getOAuthState).mockReset();
+  vi.mocked(getIP).mockReset();
+});
 
 const baseURL = "http://localhost:3000";
 const cookies = (response: Response) =>
@@ -290,6 +311,78 @@ describe.each(["database", "cookie"] as const)(
 );
 
 describe("social authentication policies", () => {
+  describe.each([undefined, "open", "closed"] as const)(
+    "hook failures with failureMode: %s",
+    (failureMode) => {
+      it.each(["device collection", "OAuth context storage"])(
+        "handles an unexpected failure in %s",
+        async (operation) => {
+          const error = new Error(`${operation} failed`);
+          const onError = vi.fn();
+          const app = await setup({ failureMode, onError });
+          if (operation === "device collection") {
+            vi.mocked(getIP).mockImplementationOnce(() => {
+              throw error;
+            });
+          } else {
+            vi.mocked(addOAuthServerContext).mockRejectedValueOnce(error);
+          }
+          const response = await app.request("/sign-in/social", {
+            provider: "google",
+            callbackURL: `${baseURL}/welcome`,
+            disableRedirect: true,
+          });
+          expect(response.status).toBe(failureMode === "closed" ? 503 : 200);
+          expect(onError).toHaveBeenCalledExactlyOnceWith({
+            operation: "evaluation",
+            error,
+          });
+          expect(app.client.evaluate).not.toHaveBeenCalled();
+          if (failureMode === "closed") {
+            expect(await response.json()).toMatchObject({
+              code: "ACCOUNT_EVALUATION_UNAVAILABLE",
+            });
+            return;
+          }
+          const state = new URL((await response.json()).url).searchParams.get(
+            "state",
+          )!;
+          const result = await app.complete({
+            state,
+            cookie: cookies(response),
+          });
+          expect(result.headers.get("location")).toBe(`${baseURL}/welcome`);
+          expect(app.db.session).toHaveLength(1);
+        },
+      );
+
+      it("handles OAuth context retrieval failure without allowing an unverified identity", async () => {
+        const onError = vi.fn();
+        const app = await setup({ failureMode, onError });
+        const flow = await app.start();
+        const error = new Error("OAuth context unavailable");
+        vi.mocked(getOAuthState).mockRejectedValueOnce(error);
+        const response = await app.complete(flow);
+        expect(app.db.session).toHaveLength(failureMode === "closed" ? 0 : 1);
+        expect(app.client.evaluate).not.toHaveBeenCalled();
+        expect(app.client.reportDecision).not.toHaveBeenCalled();
+        expect(onError).toHaveBeenCalledExactlyOnceWith({
+          operation: "evaluation",
+          error,
+        });
+        if (failureMode === "closed") {
+          expect(
+            new URL(response.headers.get("location")!).searchParams.get(
+              "error",
+            ),
+          ).toBe("ACCOUNT_EVALUATION_UNAVAILABLE");
+        } else {
+          expect(response.headers.get("location")).toBe(`${baseURL}/welcome`);
+        }
+      });
+    },
+  );
+
   it("preserves the initiating request's IP fallback", async () => {
     const app = await setup();
     await app.complete(
