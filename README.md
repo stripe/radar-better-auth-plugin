@@ -1,6 +1,6 @@
 # Account Evaluations for Better Auth
 
-Stripe account risk checks for Better Auth email/password signup and login, with a Next.js example.
+Stripe account risk checks for Better Auth email/password and social signup and login, with a Next.js email/password example.
 
 See the [plugin README](packages/account-evaluations/README.md) for installation, integration, and behavior.
 

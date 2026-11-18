@@ -1,6 +1,6 @@
 # @stripe/radar-better-auth
 
-Stripe [Account Evaluations](https://docs.stripe.com/radar/customer-account-evaluations) for Better Auth email/password signup and login.
+Stripe [Account Evaluations](https://docs.stripe.com/radar/customer-account-evaluations) for Better Auth email/password and social signup and login.
 
 ## Install
 

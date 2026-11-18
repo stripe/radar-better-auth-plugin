@@ -49,6 +49,7 @@ function setup(
     logger: { disabled: true },
     ...authOptions,
     plugins: [
+      ...(authOptions.plugins ?? []),
       accountEvaluations({ client, ...config } as AccountEvaluationsConfig),
     ],
   });
@@ -91,6 +92,197 @@ function setup(
 }
 
 describe("Better Auth integration", () => {
+  describe.each([undefined, "open", "closed"] as const)(
+    "hook failures with failureMode: %s",
+    (failureMode) => {
+      it.each(["throws", "missing user"])(
+        "applies the failure policy when the evaluation's user lookup %s",
+        async (outcome) => {
+          const onError = vi.fn();
+          const app = setup({
+            failureMode,
+            onError,
+            resolveCustomer: async () => "cus_existing",
+          });
+          await app.signup();
+          app.client.evaluate.mockClear();
+          app.client.reportDecision.mockClear();
+          const adapter = (await app.auth.$context).internalAdapter;
+          const lookup = vi.spyOn(adapter, "findUserById");
+          if (outcome === "throws")
+            lookup.mockRejectedValueOnce(new Error("Lookup unavailable"));
+          else lookup.mockResolvedValueOnce(null);
+          const response = await app.login();
+          expect(response.status).toBe(failureMode === "closed" ? 503 : 200);
+          expect(app.db.session).toHaveLength(failureMode === "closed" ? 1 : 2);
+          expect(app.client.evaluate).not.toHaveBeenCalled();
+          expect(app.client.reportDecision).not.toHaveBeenCalled();
+          expect(onError).toHaveBeenCalledExactlyOnceWith({
+            operation: "evaluation",
+            error: expect.any(Error),
+          });
+          lookup.mockRestore();
+        },
+      );
+
+      it("handles missing request state before evaluating signup", async () => {
+        const onError = vi.fn();
+        const app = setup(
+          { failureMode, onError },
+          {
+            plugins: [
+              {
+                id: "clear-request-state",
+                init: () => ({
+                  options: {
+                    databaseHooks: {
+                      user: {
+                        create: {
+                          before: async (_user, ctx) => {
+                            if (ctx)
+                              Reflect.deleteProperty(
+                                ctx.context,
+                                "accountEvaluationsState",
+                              );
+                          },
+                        },
+                      },
+                    },
+                  },
+                }),
+              },
+            ],
+          },
+        );
+        const response = await app.signup();
+        expect(response.status).toBe(failureMode === "closed" ? 503 : 200);
+        expect(app.db.user).toHaveLength(failureMode === "closed" ? 0 : 1);
+        expect(app.db.session).toHaveLength(failureMode === "closed" ? 0 : 1);
+        expect(app.client.evaluate).not.toHaveBeenCalled();
+        expect(app.client.reportDecision).not.toHaveBeenCalled();
+        expect(onError).toHaveBeenCalledWith({
+          operation: "evaluation",
+          error: expect.objectContaining({
+            message: "Account evaluations request context is missing.",
+          }),
+        });
+      });
+
+      it.each(["save", "read"])(
+        "handles failure to %s the pending report",
+        async (stage) => {
+          const error = new Error("Pending report state unavailable");
+          const onError = vi.fn();
+          const app = setup(
+            { failureMode, onError },
+            {
+              plugins: [
+                {
+                  id: "break-pending-state",
+                  init: () => ({
+                    options: {
+                      databaseHooks: {
+                        user: {
+                          create: {
+                            before: async (_user, ctx) => {
+                              const state =
+                                ctx &&
+                                Reflect.get(
+                                  ctx.context,
+                                  "accountEvaluationsState",
+                                );
+                              if (state)
+                                Object.defineProperty(state, "pending", {
+                                  set() {
+                                    if (stage === "save") throw error;
+                                  },
+                                  get() {
+                                    if (stage === "read") throw error;
+                                  },
+                                });
+                            },
+                          },
+                        },
+                      },
+                    },
+                  }),
+                },
+              ],
+            },
+          );
+          const rejected = stage === "save" && failureMode === "closed";
+          expect((await app.signup()).status).toBe(rejected ? 503 : 200);
+          expect(app.db.session).toHaveLength(rejected ? 0 : 1);
+          expect(app.client.evaluate).toHaveBeenCalledOnce();
+          expect(app.client.reportDecision).not.toHaveBeenCalled();
+          expect(onError).toHaveBeenCalledExactlyOnceWith({
+            operation: stage === "save" ? "evaluation" : "report",
+            error,
+          });
+        },
+      );
+
+      it("does not mistake a client exception for a completed blocking decision", async () => {
+        const onError = vi.fn();
+        const app = setup({ failureMode, onError });
+        const error = new APIError("FORBIDDEN", {
+          code: "ACCOUNT_EVALUATION_BLOCKED",
+          message: "Upstream failure",
+        });
+        app.client.evaluate.mockRejectedValueOnce(error);
+        expect((await app.signup()).status).toBe(
+          failureMode === "closed" ? 503 : 200,
+        );
+        expect(app.client.reportDecision).not.toHaveBeenCalled();
+        expect(onError).toHaveBeenCalledExactlyOnceWith({
+          operation: "evaluation",
+          error,
+        });
+      });
+    },
+  );
+
+  it.each([20, 80])(
+    "logging and observer failures cannot change a completed decision at score %s",
+    async (score) => {
+      const app = setup({
+        onError: async () => {
+          throw new Error("onError unavailable");
+        },
+        onDecision: async () => {
+          throw new Error("observer unavailable");
+        },
+      });
+      const logger = (await app.auth.$context).logger;
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => {
+        throw new Error("logger unavailable");
+      });
+      app.client.reportDecision.mockRejectedValue(
+        new Error("report unavailable"),
+      );
+      app.setScore(score);
+      expect((await app.signup()).status).toBe(score < 75 ? 200 : 403);
+      expect(app.db.session).toHaveLength(score < 75 ? 1 : 0);
+      warn.mockRestore();
+    },
+  );
+
+  it("logging and onError failures cannot prevent fail-open authentication", async () => {
+    const app = setup({
+      onError: async () => {
+        throw new Error("onError unavailable");
+      },
+    });
+    const logger = (await app.auth.$context).logger;
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {
+      throw new Error("logger unavailable");
+    });
+    app.client.evaluate.mockRejectedValue(new Error("evaluation unavailable"));
+    expect((await app.signup()).status).toBe(200);
+    expect(app.db.session).toHaveLength(1);
+    warn.mockRestore();
+  });
+
   it("does not report allowed if another hook rejects authentication after evaluation", async () => {
     const app = setup(
       {},
